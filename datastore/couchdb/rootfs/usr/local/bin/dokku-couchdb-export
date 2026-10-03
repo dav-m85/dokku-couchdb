@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Writes a dump of a couchdb database to stdout.
+"""Writes a dump of every database on a couchdb service to stdout.
 
 The couchdb image ships no tool that can read json: no jq, no python, not even
 perl's own json module. The bash plugin worked around that by downloading a
 third party script into the running container on every export, from a branch
 rather than a tag. This runs beside the service instead, in an image dokku
 already ships, and the documents are parsed rather than pattern matched.
+
+A service hosts more than the database it was created with: an app with the
+admin credentials makes its own. The dump therefore covers every database the
+server does not keep for itself, and names the service's own so that an import
+into another service can map it onto that service's database. Attachments are
+inlined so the dump stands alone.
 """
 import base64
 import json
@@ -30,22 +36,35 @@ def request(path):
         return json.load(response)
 
 
-def main():
-    try:
-        listing = request("{}/_all_docs?include_docs=true".format(DATABASE))
-    except urllib.error.HTTPError as error:
-        sys.stderr.write("unable to read {}: {}\n".format(DATABASE, error))
-        return 1
+def documents(database):
+    listing = request("{}/_all_docs?include_docs=true&attachments=true".format(database))
 
     # the design documents belong to the database rather than to the data, and
     # restoring them into a database that already has them conflicts
-    documents = [
+    return [
         row["doc"]
         for row in listing.get("rows", [])
         if row.get("doc") and not row["id"].startswith("_design/")
     ]
 
-    json.dump({"docs": documents}, sys.stdout)
+
+def main():
+    try:
+        # _users, _replicator and the like are the server's, not the service's
+        names = [name for name in request("_all_dbs") if not name.startswith("_")]
+    except urllib.error.HTTPError as error:
+        sys.stderr.write("unable to list databases: {}\n".format(error))
+        return 1
+
+    databases = {}
+    for name in names:
+        try:
+            databases[name] = {"docs": documents(name)}
+        except urllib.error.HTTPError as error:
+            sys.stderr.write("unable to read {}: {}\n".format(name, error))
+            return 1
+
+    json.dump({"database": DATABASE, "databases": databases}, sys.stdout)
     sys.stdout.write("\n")
     return 0
 
